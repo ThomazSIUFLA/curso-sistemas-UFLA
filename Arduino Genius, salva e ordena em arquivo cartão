@@ -1,0 +1,591 @@
+/*
+  Projeto prático - Sistema em Dispositivo Embarcado
+  Disciplina Estrutura de Dados (GCC216)
+
+  Genius com ordenação externa
+
+  Criado Junho 2019
+
+  por: Pedro Henrique de Menezes & Thomaz Flanklin de Souza Jorge
+
+  Programa implementa o jogo Genius, famoso na década de 90 e distribuido
+  pela empresa Estrela
+  utiliza uma fila para guardar as sequencias do jogo
+  logo após o jogador executar uma sequencia errada, é realizado o salvamento em
+  um arquivo, que posteriormente será ordenado, para a criação de um ranking de recordes.
+
+*/
+
+//bibliotecas necessárias para o cartão SD
+#include <SPI.h>
+#include <SD.h>
+
+//definindo frequencia das notas
+#define NOTE_D4  294
+#define NOTE_G4  392
+#define NOTE_A4  440
+#define NOTE_A5  880
+
+//estrutura de fila para salvar sequencias
+class Noh {
+    friend class Fila;
+  public:
+    Noh(int _valor);
+  private:
+    int valor;
+    Noh* proximo;
+};
+
+Noh::Noh(int _valor) {
+  valor = _valor;
+  proximo = NULL;
+}
+
+class Fila {
+  public:
+    Fila();
+    ~Fila();
+    void Queue(int _valor);
+    void Enfileira(int _valor);
+    int Spy();
+    int Espiar();
+    int Dequeue();
+    int Desenfileira();
+    int GetTamanho();
+  private:
+    int tamanho;
+    Noh* inicio;
+    Noh* fim;
+};
+
+Fila::Fila () {
+  tamanho = 0;
+  inicio = NULL;
+  fim = NULL;
+}
+
+Fila::~Fila () {
+  Noh* aDeletar = inicio;
+  Noh* aux = inicio;
+
+  while (aDeletar != NULL) {
+    aux = aux->proximo;
+    delete aDeletar;
+    aDeletar = aux;
+  }
+}
+
+void Fila::Queue(int _valor) {
+  Noh* novoNoh = new Noh(_valor);
+
+  if (inicio == NULL) {
+    inicio = novoNoh;
+    fim = novoNoh;
+  } else {
+    fim->proximo = novoNoh;
+    fim = novoNoh;
+  }
+  tamanho++;
+}
+
+void Fila::Enfileira(int _valor) {
+  Queue(_valor);
+}
+int Fila::GetTamanho() {
+  return tamanho;
+}
+int Fila::Spy() {
+  if (inicio == NULL) {
+    return -1;
+  }
+
+  return inicio->valor;
+}
+
+int Fila::Espiar() {
+  return Spy();
+}
+
+int Fila::Dequeue() {
+  if (inicio == NULL) {
+    return -1;
+  } else {
+    int retorno = inicio->valor;
+    Noh* aux = inicio;
+    inicio = inicio->proximo;
+    delete aux;
+
+    if (tamanho == 1) {
+      fim = NULL;
+    }
+    tamanho--;
+    return retorno;
+  }
+}
+
+int Fila::Desenfileira() {
+  return Dequeue();
+}
+// criando o array para os 4 sons para sortear um som
+int tons[4] = { NOTE_A5, NOTE_A4, NOTE_G4, NOTE_D4 };
+//instanciando uma nova fila para guardar a sequencia
+Fila* filaOrig = new Fila();
+// Indica a rodada atual que o jogo se encontra.
+int rodada_atual = 1;
+// Indica o passo atual dentro da sequência, é usado enquanto a sequência
+// está sendo reproduzida.
+int passo_atual_na_sequencia = 0;
+/*
+   Indica o pino de áudio, leds e botões.
+   Os pinos de leds e botões estão em ordem, relacionados uns aos outros, ou
+   seja, o primeiro led está relacionado ao primeiro botão. A ordem destas
+   sequências também estão relacionadas a ordem dos tons.
+*/
+int pinoAudio = A1;
+int pinosLeds[4] = { 7, 8, 9, 10 };
+int pinosBotoes[4] = { 2, 3, 5, 6 };
+// Indica se um botão foi pressionado durante o loop principal.
+int botao_pressionado = 0;
+// Flag indicando se o jogo acabou.
+int perdeu_o_jogo = false;
+
+void setup() {
+  //definindo abertura do arquivo e porta para comunicação
+  Serial.begin(9600);
+
+  while (!Serial) {
+    ; // aguardando a porta serial se conectar.
+  }
+  if (!SD.begin(4)) {
+    Serial.println("inicialização falhou!");
+    while (1);
+  }
+  Serial.println("inicialização ok.");
+
+  // Definindo o modo dos pinos dos Leds como saída.
+  for (int i = 0; i <= 3; i++) {
+    pinMode(pinosLeds[i], OUTPUT);
+  }
+  // Definindo o modo dos pinos dos Botões como entrada.
+  for (int i = 0; i <= 3; i++) {
+    pinMode(pinosBotoes[i], INPUT);
+  }
+  // Definindo o modo do pino de Áudio como saída.
+  pinMode(pinoAudio, OUTPUT);
+
+  // Inicializando o random através de uma leitura da porta analógica.
+  // Esta leitura gera um valor variável entre 0 e 1023.
+  randomSeed(analogRead(0));
+}
+
+void loop() {
+  // Se perdeu o jogo reinicializamos todas as variáveis.
+  if (perdeu_o_jogo) {
+    for (int i = 0; i < rodada_atual - 1; i++) {
+      filaOrig->Desenfileira();
+    }
+    rodada_atual = 1;
+    passo_atual_na_sequencia = 0;
+    perdeu_o_jogo = false;
+  }
+  // Toca um som de início para anúnicar que o jogo está começando quando é a primeira rodada.
+  if (rodada_atual == 1) {
+    tocarSomDeInicio();
+    delay(500);
+  }
+  // Chama a função que inicializa a próxima rodada.
+  proximaRodada();
+  // Reproduz a sequência atual.
+  reproduzirSequencia();
+  // Aguarda os botões serem pressionados pelo jogador.
+  aguardarJogador();
+  // Aguarda 1 segundo entre cada jogada.
+  delay(1000);
+}
+
+// Sorteia um novo item e adiciona na sequência.
+void proximaRodada() {
+  filaOrig->Enfileira(random(0, 4));
+}
+
+// Reproduz a sequência para ser memorizada.
+void reproduzirSequencia() {
+  for (int i = 0; i < rodada_atual; i++) {
+    int posicao = filaOrig->Desenfileira();
+    tone(pinoAudio, tons[posicao]);
+    digitalWrite(pinosLeds[posicao], HIGH);
+    delay(500);
+    noTone(pinoAudio);
+    digitalWrite(pinosLeds[posicao], LOW);
+    delay(100);
+    filaOrig->Enfileira(posicao);
+  }
+  noTone(pinoAudio);
+}
+
+// Aguarda o jogador iniciar sua jogada.
+void aguardarJogador() {
+  for (int i = 0; i < rodada_atual; i++) {
+    aguardarJogada();
+    verificarJogada();
+    if (perdeu_o_jogo) {
+      break;
+    }
+    passo_atual_na_sequencia++;
+  }
+  rodada_atual++;
+  // Redefine a variável para 0.
+  passo_atual_na_sequencia = 0;
+}
+
+void aguardarJogada() {
+  boolean jogada_efetuada = false;
+  while (!jogada_efetuada) {
+    for (int i = 0; i <= 3; i++) {
+      if (digitalRead(pinosBotoes[i]) == HIGH) {
+        // Dizendo qual foi o botao pressionado.
+        botao_pressionado = i;
+        tone(pinoAudio, tons[i]);
+        digitalWrite(pinosLeds[i], HIGH);
+        delay(300);
+        digitalWrite(pinosLeds[i], LOW);
+        noTone(pinoAudio);
+        jogada_efetuada = true;
+      }
+    }
+    delay(10);
+  }
+}
+
+void verificarJogada() {
+  int posicao =  filaOrig->Desenfileira();
+  if (posicao != botao_pressionado) {
+    // GAME OVER.
+    for (int i = 0; i <= 3; i++) {
+      tone(pinoAudio, tons[i]);
+      digitalWrite(pinosLeds[i], HIGH);
+      delay(200);
+      digitalWrite(pinosLeds[i], LOW);
+      noTone(pinoAudio);
+    }
+
+    tone(pinoAudio, tons[3]);
+    for (int i = 0; i <= 3; i++) {
+      digitalWrite(pinosLeds[0], HIGH);
+      digitalWrite(pinosLeds[1], HIGH);
+      digitalWrite(pinosLeds[2], HIGH);
+      digitalWrite(pinosLeds[3], HIGH);
+      delay(100);
+      digitalWrite(pinosLeds[0], LOW);
+      digitalWrite(pinosLeds[1], LOW);
+      digitalWrite(pinosLeds[2], LOW);
+      digitalWrite(pinosLeds[3], LOW);
+      delay(100);
+    }
+    noTone(pinoAudio);
+    // se o jogador acertou ao menos uma sequencia
+    //grava o valor no arquivo e em seguida manda ordenar
+    if (filaOrig->GetTamanho() > 0) {
+      escreverArquivo();
+      mergeExterno();
+    }
+    perdeu_o_jogo = true;
+  } else {
+    filaOrig->Enfileira(posicao);
+  }
+}
+
+void tocarSomDeInicio() {
+  tone(pinoAudio, tons[0]);
+  digitalWrite(pinosLeds[0], HIGH);
+  digitalWrite(pinosLeds[1], HIGH);
+  digitalWrite(pinosLeds[2], HIGH);
+  digitalWrite(pinosLeds[3], HIGH);
+  delay(500);
+  digitalWrite(pinosLeds[0], LOW);
+  digitalWrite(pinosLeds[1], LOW);
+  digitalWrite(pinosLeds[2], LOW);
+  digitalWrite(pinosLeds[3], LOW);
+  delay(500);
+  noTone(pinoAudio);
+}
+void escreverArquivo() {
+  //criando o arquivo e salvando o valor
+  File arq;
+  Serial.println(filaOrig->GetTamanho());
+  arq = SD.open("saida.txt", FILE_WRITE);
+
+  if (arq) {
+    Serial.println("Esperando por saida.txt...");
+    delay(25);
+    arq.println(filaOrig->GetTamanho());
+    arq.close();
+    Serial.println("ok!");
+  } else {
+    Serial.println("Erro ao abrir saida.txt");
+  }
+}
+//função que intercala os arquivos
+bool intercalaBloco(File auxE[2], File auxS[2], int passo, int saida) {
+  //inicialmente sem intercalação
+  bool intercalou = false;
+  //armazenar dados dos dois arquivos de entrada
+  int dados[2];
+  //posição relativa de leitura em cada um dos arquivos
+  int posicao[2] = {0, 0};
+  //informa se os dados são válidos(lidos e não escritos ainda)
+  bool valido[2] = {false, false};
+
+  //em cada passo de tamanho n, lemos n dados de cada arquivo
+  //e fazemos a intercalação em um novo bloco de tamanho 2n
+  //no arquivo de saída
+  while (posicao[0] + posicao[1] < (2 * passo)) {
+    //verificamos se ha dados para ler
+    if ((posicao[0] < passo) && (!valido[0])) {
+      //tenta ler do arquivo e verifica se a leitura é válida
+      //função "available" retorna se ainda existe algo no arquivo
+      if (auxE[0].available()) {
+        //a leitura retorna um char, então convertemos em inteiro
+        //e armazenamos no vetor dados[]
+        dados[0] = (auxE[0].parseInt());
+        valido[0] = true;
+      } else {
+        //leitura inválida -> final do arquivo
+        posicao[0] = passo;
+      }
+    }
+
+    //repete o processo para o segundo arquivo
+    //verificamos se ha dados para ler
+    if ((posicao[1] < passo) && (!valido[1])) {
+      //tenta ler do arquivo e verifica se a leitura é válida
+      //função "available" retorna se ainda existe algo no arquivo
+      if (auxE[1].available()) {
+        //a leitura retorna um char, então convertemos em inteiro
+        //e armazenamos no vetor dados[]
+        dados[1] = (auxE[1].parseInt());
+        valido[1] = true;
+      } else {
+        //leitura inválida -> final do arquivo
+        posicao[1] = passo;
+      }
+    }
+
+    //nesse momento já existe dados lidos dos dois arquivos
+    //a não ser que um ou ambos tenham chegado ao fim
+
+    //primeiro caso, os dois são válidos
+    if (valido[0] && valido[1]) {
+      //marca que intercalou
+      intercalou = true;
+      //gravamos o maior valor, pois será um ranking
+      if (dados[0] >= dados[1]) {
+        auxS[saida].println(dados[0]);
+        //dado não será mais utilizado, avança posição
+        valido[0] = false;
+        posicao[0]++;
+      } else {
+        auxS[saida].println(dados[1]);
+        //dado não será mais utilizado, avança posição
+        valido[1] = false;
+        posicao[1]++;
+      }
+
+      //segundo caso, apenas o primeiro é válido
+    } else if (valido[0]) {
+      intercalou = true;
+      auxS[saida].println(dados[0]);
+      valido[0] = false;
+      posicao[0]++;
+      //terceiro caso, apenas o segundo é válido
+    } else if (valido[1]) {
+      intercalou = true;
+      if (dados[1] != 0) {
+        auxS[saida].println(dados[1]);
+      }
+      //se chegou aqui, termina o while na próxima iteração
+
+      valido[1] = false;
+      posicao[1]++;
+      Serial.print("acabou mandou: ");
+      Serial.println(dados[1]);
+    }
+  }
+  return intercalou;
+}
+
+void mergeExterno() {
+  //variável para armazenar o tamanho do arquivo á ser ordenado
+  int tamanho = 0;
+  //abrindo o arquivo
+  File arqEntrada = SD.open("saida.txt", FILE_READ);
+  //se abriu, encontramos o tamanho
+  if (arqEntrada) {
+    //variável temporária, sem utilidade
+    int valor;
+    //repetição para pegar a quantidade de dados no arquivo
+    //enquanto existir dados para ler, manda o dado para a
+    //variável temporária "valor" e incrementa o tamanho
+    while (arqEntrada.available()) {
+      //variável "valor" recebe dado referente a um inteiro
+      if (arqEntrada.parseInt(valor, sizeof(int))) {
+        tamanho++;
+      }
+    }
+  }
+
+  //fecha o arquivo
+  arqEntrada.close();
+
+  int metade = tamanho / 2;
+  //reabrimos o arquivo para posicionar a leitura no começo
+  arqEntrada = SD.open("saida.txt", FILE_READ);
+
+  //abrimos dois arquivos auxiliares
+  File arqB1 = SD.open("arqB1.txt", FILE_WRITE);
+  File arqB2 = SD.open("arqB2.txt", FILE_WRITE);
+
+  //laço para divir o arquivo principal em dois
+  for (int i = 0; i < metade; i++) {
+    arqB1.println((int)arqEntrada.parseInt());
+  }
+  for (int i = metade; i < tamanho; i++) {
+    arqB2.println((int)arqEntrada.parseInt());
+  }
+
+  //fechando os arquivos
+  arqEntrada.close();
+  arqB1.close();
+  arqB2.close();
+
+  //variáveis de controle
+  int passo = 1;
+  bool ida = true;
+  bool ultimo[2];
+
+  //vetores para arquivos auxiliares
+  File auxEntrada[2];
+  File auxSaida[2];
+
+  //laço principal
+  while (passo <= tamanho) {
+    //escolhemos quais arquivos para leitura e escrita
+    //depende se ida é válido ou não
+    if (ida) {
+      //removemos os arquivos que receberão novos valores
+      //a não remoção implica em sempre escrever na frente
+      SD.remove("arqC1.txt");
+      SD.remove("arqC2.txt");
+      auxEntrada[0] = SD.open("arqB1.txt", FILE_READ);
+      auxEntrada[1] = SD.open("arqB2.txt", FILE_READ);
+      auxSaida[0] = SD.open("arqC1.txt", FILE_WRITE);
+      auxSaida[1] = SD.open("arqC2.txt", FILE_WRITE);
+    } else {
+      //removemos os arquivos que receberão novos valores
+      //a não remoção implica em sempre escrever na frente
+      SD.remove("arqB1.txt");
+      SD.remove("arqB2.txt");
+      auxEntrada[0] = SD.open("arqC1.txt", FILE_READ);
+      auxEntrada[1] = SD.open("arqC2.txt", FILE_READ);
+      auxSaida[0] = SD.open("arqB1.txt", FILE_WRITE);
+      auxSaida[1] = SD.open("arqB2.txt", FILE_WRITE);
+    }
+    if ((!auxEntrada[0]) || (!auxEntrada[1]) || (!auxSaida[0]) || (!auxSaida[1])) {
+      exit(EXIT_FAILURE);
+    }
+    //variavel auxiliar para tamanho arquivo entrada 1
+    int tamanho1 = 0;
+    //variavel temporaria, sem uso
+    int valor;
+    //laço para tamanho arquivo entrada 1
+    while (auxEntrada[0].available()) {
+      if (auxEntrada[0].parseInt(valor, sizeof(int))) {
+        tamanho1++;
+      }
+    }
+    //variável auxiliar para tamanho arquivo 2
+    int tamanho2 = 0;
+    //laço para tamanho arquivo 2
+    while (auxEntrada[1].available()) {
+      if (auxEntrada[1].parseInt(valor, sizeof(int))) {
+        tamanho2++;
+      }
+    }
+    //reposicionando leitura para início dos arquivos
+    //com função "seek()", passando 0 como posição
+    auxEntrada[0].seek(0);
+    auxEntrada[1].seek(0);
+    //enquanto o tamanho de cada arquivo dividido pelo passo atual
+    //sejam maiores que 1, chama a função intercala blocos
+    //passando os vetores de arquivos de entrada e saída, o passo
+    //atual, e 0 ou 1, para definir qual arquivo de saída será escrito
+    while (((tamanho1 / passo) >= 1) || ((tamanho2 / passo) >= 1)) {
+      ultimo[0] = intercalaBloco(auxEntrada, auxSaida, passo, 0);
+      ultimo[1] = intercalaBloco(auxEntrada, auxSaida, passo, 1);
+      //decrementamos os tamanhos dos arquivos
+      tamanho1--;
+      tamanho2--;
+    }
+    //fechamos todos os arquivos usados na intercalação
+    auxEntrada[0].close();
+    auxEntrada[1].close();
+    auxSaida[0].close();
+    auxSaida[1].close();
+
+    //invertemos o valor da variável "ida" e dobramos o tamanho do passo
+    ida = !ida;
+    passo = passo * 2;
+  }
+  //identificar qual arquivo com os dados ordenados será usado para
+  //para escrever no arquivo de saída final
+  File auxEnt;
+  if (ida) {
+    if (ultimo[0]) {
+      auxEnt = SD.open("arqB1.txt", FILE_READ);
+    } else {
+      auxEnt = SD.open("arqB2.txt", FILE_READ);
+    }
+  } else {
+    if (ultimo[0]) {
+      auxEnt = SD.open("arqC1.txt", FILE_READ);
+    } else {
+      auxEnt = SD.open("arqC2.txt", FILE_READ);
+    }
+  }
+
+  //removemos o arquivo antigo, para substituir pelo novo
+
+  //criamos o novo arquivo que terá os valores ordenados
+  //se optar pelo mesmo arquivo de entrada, que estava desordenado
+  //seja o arquivo ordenado, basta dar o mesmo nome do arquivo de entrada
+  SD.remove("ordenado.txt");
+  File arqSaida = SD.open("ordenado.txt", FILE_WRITE);
+  if (auxEnt) {
+    int valorF;
+    //enquanto o arquivo auxEnt existir dados, copiamos para o arquivo final
+    while (auxEnt.available()) {
+      valorF = ((int)auxEnt.parseInt());
+      //teste se o valor a ser copiado não é 0
+      //pois linhas vazias nas intercalações geram 0 como saída
+      if (valorF != 0) {
+        arqSaida.println(valorF);
+      }
+    }
+  }
+  //fechamos todos arquivos utilizados
+  auxEnt.close();
+  arqSaida.close();
+  //abrimos o arquivo ordenado, somente para verificar no terminal
+  //se os dados estão realmente ordenados
+  arqSaida = SD.open("ordenado.txt", FILE_READ);
+  while (arqSaida.available()) {
+    Serial.println((int)arqSaida.parseInt());
+  }
+  arqSaida.close();
+  //removemos os arquivos auxiliares
+  SD.remove("arqB1.txt");
+  SD.remove("arqB2.txt");
+  SD.remove("arqC1.txt");
+  SD.remove("arqC2.txt");
+  Serial.println("grazadeus");
+}
